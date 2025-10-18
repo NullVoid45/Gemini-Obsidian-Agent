@@ -1,6 +1,6 @@
 import tkinter as tk
 import customtkinter
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import os
 import requests
 import sys
@@ -10,7 +10,7 @@ from PIL import Image, UnidentifiedImageError
 
 # --- INITIALIZE CUSTOMTKINTER ---
 customtkinter.set_appearance_mode("dark")
-customtkinter.set_default_color_theme("blue") 
+customtkinter.set_default_color_theme("blue")
 
 # --- SCRIPT SETUP ---
 try:
@@ -21,212 +21,183 @@ except ImportError:
     _HAS_GENAI = False
 
 # --- CONFIGURATION ---
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY')
-OBSIDIAN_API_KEY = os.environ.get('OBSIDIAN_API_KEY', 'YOUR_OBSIDIAN_API_KEY')
-OBSIDIAN_API_URL = os.environ.get('OBSIDIAN_API_URL', 'https://127.0.0.1:2724')
+class Config:
+    def __init__(self):
+        self.config_file = "config.json"
+        self.defaults = {
+            "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
+            "OBSIDIAN_API_KEY": "YOUR_OBSIDIAN_API_KEY",
+            "OBSIDIAN_API_URL": "http://127.0.0.1:27123/"
+        }
+        self.load()
 
-if _HAS_GENAI and GEMINI_API_KEY and GEMINI_API_KEY != 'YOUR_GEMINI_API_KEY':
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"Warning: failed to configure Google Generative AI client: {e}", file=sys.stderr)
-        _HAS_GENAI = False
+    def load(self):
+        if os.path.exists(self.config_file):
+            with open(self.config_file, 'r') as f:
+                self.config = json.load(f)
+        else:
+            self.config = self.defaults
+            self.save()
 
-selected_image_path = None
-welcome_label = None
+    def save(self):
+        with open(self.config_file, 'w') as f:
+            json.dump(self.config, f, indent=4)
 
-# --- HELPER FUNCTIONS ---
+    def get(self, key):
+        return self.config.get(key)
+
+    def set(self, key, value):
+        self.config[key] = value
+        self.save()
+
+config = Config()
+
+# --- API CLIENTS ---
+def configure_gemini():
+    global _HAS_GENAI
+    api_key = config.get("GEMINI_API_KEY")
+    if _HAS_GENAI and api_key and "YOUR_GEMINI_API_KEY" not in api_key:
+        try:
+            genai.configure(api_key=api_key)
+            return True
+        except Exception as e:
+            print(f"Warning: failed to configure Google Generative AI client: {e}", file=sys.stderr)
+            _HAS_GENAI = False
+            return False
+    return False
+
+configure_gemini()
+
 def get_obsidian_headers():
-    return {'Authorization': f'Bearer {OBSIDIAN_API_KEY}'}
+    return {'Authorization': f'Bearer {config.get("OBSIDIAN_API_KEY")}'}
 
-def hide_welcome_message():
-    global welcome_label
-    if welcome_label:
-        welcome_label.destroy()
-        welcome_label = None
+# --- UI ---
+class GeminiApp(customtkinter.CTk):
+    def __init__(self):
+        super().__init__()
 
-# --- OBSIDIAN FUNCTIONS ---
-def read_note(note_title):
-    # This function and other Obsidian functions (save, delete) remain the same.
-    # ... (code for read_note, save_note, delete_note is unchanged)
-    if not note_title:
-        return
-    hide_welcome_message()
-    note_path = f"/vault/{requests.utils.quote(note_title)}.md"
-    try:
-        response = requests.get(OBSIDIAN_API_URL + note_path, headers=get_obsidian_headers(), verify=False)
-        response.raise_for_status()
-        chat_box.delete("1.0", "end")
-        chat_box.insert("0.0", response.text)
-        status_label.configure(text=f"Successfully loaded '{note_title}'.")
-    except requests.exceptions.RequestException:
-        messagebox.showerror("API Error", f"Note '{note_title}' not found or API issue.")
-        status_label.configure(text=f"Error loading '{note_title}'.")
+        self.title("Gemini Obsidian Helper")
+        self.geometry("800x600")
 
-def save_note(note_title):
-    content = chat_box.get("1.0", "end-1c").strip()
-    if not content or (welcome_label is not None):
-        return
-    if not note_title:
-        return
-    note_path = f"/vault/{requests.utils.quote(note_title)}.md"
-    try:
-        response = requests.put(OBSIDIAN_API_URL + note_path, headers=get_obsidian_headers(), data=content.encode('utf-8'), verify=False)
-        response.raise_for_status()
-        messagebox.showinfo("Success", f"Note '{note_title}' has been saved.")
-        status_label.configure(text=f"Note '{note_title}' saved successfully.")
-    except requests.exceptions.RequestException as e:
-        messagebox.showerror("API Error", f"Failed to save note: {e}")
-        status_label.configure(text="Error saving note.")
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-def delete_note(note_title):
-    if not note_title:
-        return
-    if not messagebox.askyesno("Confirm Delete", f"Are you sure you want to permanently delete '{note_title}'?"):
-        return
-    hide_welcome_message()
-    note_path = f"/vault/{requests.utils.quote(note_title)}.md"
-    try:
-        response = requests.delete(OBSIDIAN_API_URL + note_path, headers=get_obsidian_headers(), verify=False)
-        response.raise_for_status()
-        chat_box.delete("1.0", "end")
-        messagebox.showinfo("Success", f"Note '{note_title}' has been deleted.")
-        status_label.configure(text=f"Note '{note_title}' deleted.")
-    except requests.exceptions.RequestException as e:
-        messagebox.showerror("API Error", f"Failed to delete note: {e}")
-        status_label.configure(text="Error deleting note.")
+        # --- CHAT FRAME ---
+        self.chat_frame = customtkinter.CTkFrame(self, corner_radius=0)
+        self.chat_frame.grid(row=0, column=0, sticky="nsew")
+        self.chat_frame.grid_columnconfigure(0, weight=1)
+        self.chat_frame.grid_rowconfigure(0, weight=1)
 
-# --- CORE LOGIC ---
-def parse_command(prompt_snippet):
-    system_prompt = "..." # Kept for brevity
-    try:
-        # --- DYNAMICALLY GET SELECTED MODEL ---
-        # Use the faster flash model for quick command parsing
-        parser_model = genai.GenerativeModel('gemini-flash-latest')
-        response = parser_model.generate_content(system_prompt + "\nUser: " + prompt_snippet)
-        json_response = response.text.strip().replace("`", "").replace("json", "")
-        return json.loads(json_response)
-    except Exception:
-        return {"action": "ask_gemini", "filename": None}
+        self.chat_box = customtkinter.CTkTextbox(self.chat_frame, wrap=tk.WORD, font=("", 16), corner_radius=0, border_width=0)
+        self.chat_box.grid(row=0, column=0, sticky="nsew")
 
-def ask_gemini_for_answer(prompt):
-    global selected_image_path
-    hide_welcome_message()
-    
-    chat_box.delete("1.0", "end")
-    chat_box.insert("end", f"👤 You:\n{prompt}\n\n")
-    status_label.configure(text="Asking Gemini...")
-    app.update_idletasks()
-    
-    try:
-        content_to_send = [prompt]
-        if selected_image_path:
-            img = Image.open(selected_image_path)
-            content_to_send.append(img)
+        # --- INPUT FRAME ---
+        self.input_frame = customtkinter.CTkFrame(self, corner_radius=0)
+        self.input_frame.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
+        self.input_frame.grid_columnconfigure(1, weight=1)
 
-        # --- DYNAMICALLY GET SELECTED MODEL ---
-        # Get the user's choice from the dropdown menu variable
-        selected_model_name = model_selection_var.get()
-        chat_model = genai.GenerativeModel(selected_model_name)
-        
-        response = chat_model.generate_content(content_to_send)
-        chat_box.insert("end", f"✨ Gemini:\n{response.text}")
-        status_label.configure(text="Ready.")
-    except Exception as e:
-        messagebox.showerror("Gemini API Error", f"An error occurred: {e}")
-        status_label.configure(text="Error with Gemini request.")
-    finally:
-        selected_image_path = None
+        self.attachment_label = customtkinter.CTkLabel(self.input_frame, text="", font=("", 12))
+        self.attachment_label.grid(row=1, column=1, padx=10, pady=0, sticky="w")
 
-def handle_prompt():
-    prompt = prompt_entry.get().strip()
-    if not prompt:
-        return
+        self.prompt_entry = customtkinter.CTkEntry(self.input_frame, placeholder_text="Enter your prompt...", font=("", 16), height=40)
+        self.prompt_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        self.prompt_entry.bind("<Return>", self.send_prompt)
 
-    prompt_entry.delete(0, "end")
-    status_label.configure(text="Parsing command...")
+        self.attach_button = customtkinter.CTkButton(self.input_frame, text="📁", command=self.attach_file, width=40, height=40, font=("", 25))
+        self.attach_button.grid(row=0, column=0, padx=10, pady=20)
 
-    prompt_snippet_for_parsing = prompt[:100]
-    command = parse_command(prompt_snippet_for_parsing)
+        self.send_button = customtkinter.CTkButton(self.input_frame, text="➤", command=self.send_prompt, width=40, height=40, font=("", 20))
+        self.send_button.grid(row=0, column=2, padx=10, pady=10)
 
-    action = command.get("action")
-    filename = command.get("filename")
+        # --- SETTINGS BUTTON ---
+        self.settings_button = customtkinter.CTkButton(self, text="⚙️", command=self.open_settings, width=40, height=40, font=("", 20))
+        self.settings_button.place(relx=1.0, rely=0, anchor="ne")
 
-    if action == "save_note":
-        save_note(filename)
-    elif action == "read_note":
-        read_note(filename)
-    elif action == "delete_note":
-        delete_note(filename)
-    else:
-        ask_gemini_for_answer(prompt)
+        self.model_selection_var = customtkinter.StringVar(value="gemini-pro-latest")
+        self.model_menu = customtkinter.CTkOptionMenu(self,values=["gemini-pro-latest", "gemini-flash-latest"],variable=self.model_selection_var,width=150,height=40,font=("", 17))
+        self.model_menu.place(relx=0.92, rely=0.0, anchor="ne")
+        self.attached_file_path = None
 
-def start_handle_prompt_thread(event=None):
-    thread = threading.Thread(target=handle_prompt, daemon=True)
-    thread.start()
+    def attach_file(self):
+        file_path = customtkinter.filedialog.askopenfilename()
+        if file_path:
+            self.attached_file_path = file_path
+            self.attachment_label.configure(text=os.path.basename(file_path))
 
-def attach_image():
-    global selected_image_path
-    filepath = customtkinter.filedialog.askopenfilename(title="Select an image", filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp")])
-    if filepath:
-        selected_image_path = filepath
-        status_label.configure(text=f"Image ready: {os.path.basename(filepath)}")
-        prompt_entry.focus()
+    def send_prompt(self, event=None):
+        prompt = self.prompt_entry.get().strip()
+        if not prompt and not self.attached_file_path:
+            return
 
-# --- BUILD UI ---
-app = customtkinter.CTk()
-app.title('Gemini Obsidian Helper')
-app.geometry('800x600')
+        if self.attached_file_path:
+            try:
+                with open(self.attached_file_path, 'r') as f:
+                    file_content = f.read()
+                prompt = f"{prompt}\n\n--- Attached File: {os.path.basename(self.attached_file_path)} ---\n{file_content}"
+            except Exception as e:
+                self.chat_box.insert("end", f"✨ Gemini:\nError reading file: {e}\n\n")
+                return
 
-app.grid_columnconfigure(0, weight=1)
-app.grid_rowconfigure(0, weight=1)
+        self.chat_box.insert("end", f"👤 You:\n{prompt}\n\n")
+        self.prompt_entry.delete(0, "end")
+        self.attachment_label.configure(text="")
+        self.attached_file_path = None
 
-chat_frame = customtkinter.CTkFrame(app, corner_radius=0)
-chat_frame.grid(row=0, column=0, sticky="nsew")
 
-chat_box = customtkinter.CTkTextbox(chat_frame, wrap=tk.WORD, font=("", 16), corner_radius=0, border_width=0)
-chat_box.pack(fill="both", expand=True)
+        if not _HAS_GENAI:
+            self.chat_box.insert("end", f"✨ Gemini:\nGemini AI is not configured. Please check your API key in the settings.\n\n")
+            return
 
-welcome_font = customtkinter.CTkFont(size=32, weight="bold")
-welcome_label = customtkinter.CTkLabel(chat_frame, text="What can I help with?", font=welcome_font, fg_color="transparent")
-welcome_label.place(relx=0.5, rely=0.4, anchor="center")
+        self.chat_box.insert("end", f"✨ Gemini:\nThinking...\n\n")
+        threading.Thread(target=self.get_gemini_response, args=(prompt,)).start()
 
-input_frame = customtkinter.CTkFrame(app, corner_radius=0)
-input_frame.grid(row=1, column=0, padx=0, pady=0, sticky="ew")
-input_frame.grid_columnconfigure(1, weight=1)
+    def get_gemini_response(self, prompt):
+        try:
+            model = genai.GenerativeModel(self.model_selection_var.get())
+            response = model.generate_content(prompt)
+            self.update_chat_box(response.text)
+        except Exception as e:
+            self.update_chat_box(f"Error: {e}")
 
-attach_button = customtkinter.CTkButton(input_frame, text="📎", command=attach_image, width=40, font=("", 18))
-attach_button.grid(row=0, column=0, padx=10, pady=10)
+    def update_chat_box(self, text):
+        self.chat_box.delete("end-3l", "end") # Remove "Thinking..."
+        self.chat_box.insert("end", f"✨ Gemini:\n{text}\n\n")
 
-prompt_entry = customtkinter.CTkEntry(input_frame, placeholder_text="Ask a question or give a command...", font=("", 16), height=40)
-prompt_entry.grid(row=0, column=1, padx=0, pady=10, sticky="ew")
-prompt_entry.bind("<Return>", start_handle_prompt_thread)
 
-send_button = customtkinter.CTkButton(input_frame, text="➤", command=start_handle_prompt_thread, width=40, height=40, font=("", 20))
-send_button.grid(row=0, column=2, padx=10, pady=10)
+    def open_settings(self):
+        settings_window = customtkinter.CTkToplevel(self)
+        settings_window.title("Settings")
+        settings_window.geometry("400x300")
 
-# --- NEW: MODEL SELECTION WIDGETS ---
-model_frame = customtkinter.CTkFrame(app, corner_radius=0)
-model_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0,5))
+        gemini_api_key_label = customtkinter.CTkLabel(settings_window, text="Gemini API Key:")
+        gemini_api_key_label.pack(pady=5)
+        gemini_api_key_entry = customtkinter.CTkEntry(settings_window, width=350)
+        gemini_api_key_entry.insert(0, config.get("GEMINI_API_KEY"))
+        gemini_api_key_entry.pack(pady=5)
 
-model_label = customtkinter.CTkLabel(model_frame, text="Model:")
-model_label.pack(side="left", padx=(10,5))
+        obsidian_api_key_label = customtkinter.CTkLabel(settings_window, text="Obsidian API Key:")
+        obsidian_api_key_label.pack(pady=5)
+        obsidian_api_key_entry = customtkinter.CTkEntry(settings_window, width=350)
+        obsidian_api_key_entry.insert(0, config.get("OBSIDIAN_API_KEY"))
+        obsidian_api_key_entry.pack(pady=5)
 
-# Variable to store the current selection
-model_selection_var = customtkinter.StringVar(value="gemini-pro-latest")
+        obsidian_api_url_label = customtkinter.CTkLabel(settings_window, text="Obsidian API URL:")
+        obsidian_api_url_label.pack(pady=5)
+        obsidian_api_url_entry = customtkinter.CTkEntry(settings_window, width=350)
+        obsidian_api_url_entry.insert(0, config.get("OBSIDIAN_API_URL"))
+        obsidian_api_url_entry.pack(pady=5)
 
-model_menu = customtkinter.CTkOptionMenu(model_frame, 
-                                         values=["gemini-pro-latest", "gemini-flash-latest"],
-                                         variable=model_selection_var)
-model_menu.pack(side="left", padx=5)
-# --- END NEW WIDGETS ---
+        def save_settings():
+            config.set("GEMINI_API_KEY", gemini_api_key_entry.get())
+            config.set("OBSIDIAN_API_KEY", obsidian_api_key_entry.get())
+            config.set("OBSIDIAN_API_URL", obsidian_api_url_entry.get())
+            configure_gemini()
+            settings_window.destroy()
 
-# Status Bar - moved to the last row
-status_frame = customtkinter.CTkFrame(app, corner_radius=0, height=25)
-status_frame.grid(row=3, column=0, sticky="ew") # Now at row 3
-status_label = customtkinter.CTkLabel(status_frame, text='Ready', anchor='w')
-status_label.pack(side="left", padx=10)
+        save_button = customtkinter.CTkButton(settings_window, text="Save", command=save_settings)
+        save_button.pack(pady=20)
 
-if __name__ == '__main__':
-    prompt_entry.focus()
+
+if __name__ == "__main__":
+    app = GeminiApp()
     app.mainloop()
